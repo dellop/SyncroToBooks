@@ -1,3 +1,4 @@
+
 # Syncro MSP → Zoho Books Invoice Sync
 
 This PowerShell script syncs **unpaid invoices** from **Syncro MSP** into **Zoho Books** and (optionally) marks those invoices as *Quick Paid* in Syncro once they are successfully created in Zoho.
@@ -115,255 +116,202 @@ Example structure:
     "Subdomain": "your-syncro-subdomain"
   }
 }
+
 The script will:
 
-Validate that all required Zoho and Syncro fields exist.
+- Validate that all required Zoho and Syncro fields exist.
+- On first run, open a browser for Zoho OAuth, obtain tokens, and **write `AccessToken`, `RefreshToken`, and `TokenExpiration` back into `config.json`** using the `Save-ZohoTokens` function.
 
-On first run, open a browser for Zoho OAuth, obtain tokens, and write AccessToken, RefreshToken, and TokenExpiration back into config.json using the Save-ZohoTokens function.
+> Treat `config.json` as sensitive. It contains API credentials and tokens.  
+> Restrict file permissions and do not commit it to a public repository.
 
-Treat config.json as sensitive. It contains API credentials and tokens.
-Restrict file permissions and do not commit it to a public repository.
+### 2. ProductMappings.csv
 
-2. ProductMappings.csv
-The script expects a ProductMappings.csv file in the same directory, with at least these columns:
+The script expects a `ProductMappings.csv` file in the same directory, with at least these columns:
 
-SyncroProductID
-
-ZohoItemID
-
-ProductName
-
-IncludeDescription (Yes / No)
+- `SyncroProductID`  
+- `ZohoItemID`  
+- `ProductName`  
+- `IncludeDescription` (`Yes` / `No`)
 
 Example:
 
+```csv
 SyncroProductID,ZohoItemID,ProductName,IncludeDescription
 DEFAULT,1234567890001,Default Service,Yes
 42,1234567890002,Monthly Managed Service,Yes
 99,1234567890003,Hardware Sale,No
+```
+
 Behavior:
 
-If a line item’s product_id matches a SyncroProductID, that mapping is used.
-
-If no mapping is found, the DEFAULT row is used (if defined).
-
-If IncludeDescription is "Yes", the Syncro line item name is included as the description in Zoho.
+- If a line item’s `product_id` matches a `SyncroProductID`, that mapping is used.
+- If no mapping is found, the `DEFAULT` row is used (if defined).
+- If `IncludeDescription` is `"Yes"`, the Syncro line item name is included as the description in Zoho.
 
 The script validates that:
 
-ProductMappings.csv exists.
+- `ProductMappings.csv` exists.
+- All required columns are present.
+- A lookup table is built in memory for quick mapping.
+
+---
+
+## How It Works (High-Level Flow)
+
+1. **Startup & Logging**
+   - Creates a log file named `SyncroToBooks-Log-YYYYMMDD.txt` in the script directory.
+   - Logs start time and whether `-SkipQuickPay` was specified.
+
+2. **Config & Token Handling**
+   - Loads `config.json` and validates required fields.
+   - Reads Zoho and Syncro settings into variables.
+   - If a refresh token and token expiration are present:
+     - Checks whether the access token is still valid.
+     - If expiring or expired, calls `Refresh-ZohoAccessToken`.
+   - If no valid refresh token is available:
+     - Constructs an authorization URL using `AuthorizeUri`, `ClientID`, `Scope`, and `RedirectUri`.
+     - Opens the browser (`Start-Process`) for the user to authorize.
+     - Prompts you to paste the `code` from the redirect URL.
+     - Exchanges that code for access/refresh tokens and saves them back into `config.json`.
+
+3. **Zoho Header**
+   - Builds `zohoHeader` with:
+     - `Authorization: Zoho-oauthtoken <AccessToken>`
+     - `Content-Type: application/json;charset=UTF-8`
+
+4. **Syncro Customers**
+   - Uses `SyncroAPIKey` and `SyncroSubdomain` to construct `SyncroBaseURL`.
+   - Retrieves customers from Syncro.
+   - Builds a list of customers that have a `ZohoCustomerId` property.
+   - These become the candidates for invoice syncing.
+
+5. **Invoice Retrieval**
+   - Sets `$firstOfMonth` to the 1st of the current month.
+   - Retrieves **unpaid invoices** from Syncro with a date filter `since=$firstOfMonth` and `unpaid=true`.
+
+6. **Line Items & Product Mapping**
+   - For each unpaid invoice for a mapped customer:
+     - Fetches invoice line items from Syncro.
+     - For each line item:
+       - Looks up the product in the CSV mapping.
+       - Falls back to the `DEFAULT` mapping if none is found.
+       - Builds a Zoho Books line item:
+         - `item_id` from `ZohoItemID`
+         - `quantity` from Syncro line item quantity
+         - `rate` from Syncro line item price
+         - Optional `description` if `IncludeDescription` is `"Yes"`.
+
+7. **Invoice Creation in Zoho**
+   - Builds a Zoho Books invoice body including:
+     - `customer_id` (the ZohoCustomerId from Syncro customer property).
+     - `line_items` (from mappings).
+     - `payment_terms` (e.g., 30).
+   - Sends a `POST` to `https://www.zohoapis.com/books/v3/invoices?organization_id=<OrgID>`.
+   - Logs success/failure and tracks counters:
+     - `InvoicesProcessed`
+     - `InvoicesCreated`
+     - `InvoicesFailed`
+
+8. **Optional Quick Pay in Syncro**
+   - If **`-SkipQuickPay` is NOT specified**:
+     - Builds a payment body for Syncro:
+       - `customer_id`
+       - `invoice_id`
+       - `amount_cents` (from invoice total)
+       - `payment_method = "Quick"`
+     - Sends a `POST` to `https://<subdomain>.syncromsp.com/api/v1/payments?api_key=<APIKey>`.
+     - Logs and counts:
+       - `PaymentsCreated`
+       - `PaymentsFailed`
+   - If `-SkipQuickPay` **is** specified:
+     - Skips payment creation, logging that this is “testing mode.”
+
+9. **Final Summary**
+   - Logs a summary block with counts of invoices processed/created/failed and (if applicable) payments created/failed.
+
+---
+
+## Usage
 
-All required columns are present.
-
-A lookup table is built in memory for quick mapping.
-
-How It Works (High-Level Flow)
-Startup & Logging
-
-Creates a log file named SyncroToBooks-Log-YYYYMMDD.txt in the script directory.
-
-Logs start time and whether -SkipQuickPay was specified.
-
-Config & Token Handling
-
-Loads config.json and validates required fields.
-
-Reads Zoho and Syncro settings into variables.
-
-If a refresh token and token expiration are present:
-
-Checks whether the access token is still valid.
-
-If expiring or expired, calls Refresh-ZohoAccessToken.
-
-If no valid refresh token is available:
-
-Constructs an authorization URL using AuthorizeUri, ClientID, Scope, and RedirectUri.
-
-Opens the browser (Start-Process) for the user to authorize.
-
-Prompts you to paste the code from the redirect URL.
-
-Exchanges that code for access/refresh tokens and saves them back into config.json.
-
-Zoho Header
-
-Builds zohoHeader with:
-
-Authorization: Zoho-oauthtoken <AccessToken>
-
-Content-Type: application/json;charset=UTF-8
-
-Syncro Customers
-
-Uses SyncroAPIKey and SyncroSubdomain to construct SyncroBaseURL.
-
-Retrieves customers from Syncro.
-
-Builds a list of customers that have a ZohoCustomerId property.
-
-These become the candidates for invoice syncing.
-
-Invoice Retrieval
-
-Sets $firstOfMonth to the 1st of the current month.
-
-Retrieves unpaid invoices from Syncro with a date filter since=$firstOfMonth and unpaid=true.
-
-Line Items & Product Mapping
-
-For each unpaid invoice for a mapped customer:
-
-Fetches invoice line items from Syncro.
-
-For each line item:
-
-Looks up the product in the CSV mapping.
-
-Falls back to the DEFAULT mapping if none is found.
-
-Builds a Zoho Books line item:
-
-item_id from ZohoItemID
-
-quantity from Syncro line item quantity
-
-rate from Syncro line item price
-
-Optional description if IncludeDescription is "Yes".
-
-Invoice Creation in Zoho
-
-Builds a Zoho Books invoice body including:
-
-customer_id (the ZohoCustomerId from Syncro customer property).
-
-line_items (from mappings).
-
-payment_terms (e.g., 30).
-
-Sends a POST to https://www.zohoapis.com/books/v3/invoices?organization_id=<OrgID>.
-
-Logs success/failure and tracks counters:
-
-InvoicesProcessed
-
-InvoicesCreated
-
-InvoicesFailed
-
-Optional Quick Pay in Syncro
-
-If -SkipQuickPay is NOT specified:
-
-Builds a payment body for Syncro:
-
-customer_id
-
-invoice_id
-
-amount_cents (from invoice total)
-
-payment_method = "Quick"
-
-Sends a POST to https://<subdomain>.syncromsp.com/api/v1/payments?api_key=<APIKey>.
-
-Logs and counts:
-
-PaymentsCreated
-
-PaymentsFailed
-
-If -SkipQuickPay is specified:
-
-Skips payment creation, logging that this is “testing mode.”
-
-Final Summary
-
-Logs a summary block with counts of invoices processed/created/failed and (if applicable) payments created/failed.
-
-Usage
 Open a PowerShell session in the directory containing the script and configuration files.
 
-Normal run (create Zoho invoices and mark paid in Syncro)
-powershell
-Copy code
-.\REAL-SyncroToBooks.ps1
-Testing mode (do not create payments / do not mark as paid)
-This mode still creates invoices in Zoho, but does not create Quick payments in Syncro:
+### Normal run (create Zoho invoices and mark paid in Syncro)
 
-powershell
-Copy code
+```powershell
+.\REAL-SyncroToBooks.ps1
+```
+
+### Testing mode (do not create payments / do not mark as paid)
+
+This mode still creates invoices in Zoho, but **does not** create Quick payments in Syncro:
+
+```powershell
 .\REAL-SyncroToBooks.ps1 -SkipQuickPay
+```
+
 This is recommended for initial testing to ensure:
 
-Product mappings are correct.
+- Product mappings are correct.
+- The right customers/invoices are being processed.
+- Zoho invoices appear as expected.
 
-The right customers/invoices are being processed.
+### Scheduling with Task Scheduler
 
-Zoho invoices appear as expected.
+1. Open **Task Scheduler**.
+2. Create a new task:
+   - Set the working directory to the folder containing the script.
+   - Action: `powershell.exe`
+   - Arguments (example):
 
-Scheduling with Task Scheduler
-Open Task Scheduler.
+     ```text
+     -ExecutionPolicy Bypass -File "C:\Path\To\REAL-SyncroToBooks.ps1"
+     ```
 
-Create a new task:
+3. Choose an appropriate schedule (e.g., daily, hourly).
 
-Set the working directory to the folder containing the script.
+---
 
-Action: powershell.exe
+## Logging
 
-Arguments (example):
-
-text
-Copy code
--ExecutionPolicy Bypass -File "C:\Path\To\REAL-SyncroToBooks.ps1"
-Choose an appropriate schedule (e.g., daily, hourly).
-
-Logging
-Log file path:
-SyncroToBooks-Log-YYYYMMDD.txt in the script directory.
-
-Each run logs:
-
-Start and end times.
-
-Configuration loading and validation.
-
-Token refresh / OAuth flow.
-
-Number of customers, invoices, and line items processed.
-
-Details of each Zoho invoice and Syncro payment creation.
-
-Final summary with success/failure counts.
+- Log file path:  
+  `SyncroToBooks-Log-YYYYMMDD.txt` in the script directory.
+- Each run logs:
+  - Start and end times.
+  - Configuration loading and validation.
+  - Token refresh / OAuth flow.
+  - Number of customers, invoices, and line items processed.
+  - Details of each Zoho invoice and Syncro payment creation.
+  - Final summary with success/failure counts.
 
 Use these logs to troubleshoot configuration or API issues.
 
-Security & Disclaimers
-Protect config.json and logs:
+---
 
-config.json contains API keys and OAuth tokens.
+## Security & Disclaimers
 
-Log files may include invoice and customer IDs.
+- **Protect `config.json` and logs**:
+  - `config.json` contains API keys and OAuth tokens.
+  - Log files may include invoice and customer IDs.
+  - Restrict file permissions; do not commit secrets to public source control.
+- **Test in non-production / with `-SkipQuickPay` first**:
+  - To avoid duplicate or incorrect payments.
+  - Verify invoices in Zoho before enabling automatic Quick Pay.
+- This script is **not an official tool** from Syncro or Zoho.  
+  Use at your own risk and review the code before running it in production.
 
-Restrict file permissions; do not commit secrets to public source control.
+---
 
-Test in non-production / with -SkipQuickPay first:
+## Customization
 
-To avoid duplicate or incorrect payments.
+- **Date Range**:  
+  The default is “since the first of the current month”.  
+  You can modify the `$firstOfMonth` logic in the script if you want a different time window.
 
-Verify invoices in Zoho before enabling automatic Quick Pay.
+- **Zoho Region**:  
+  If your Zoho Books organization is not in the US region, update the Zoho Books API base URL in the script (`https://www.zohoapis.com`) to the appropriate regional endpoint.
 
-This script is not an official tool from Syncro or Zoho.
-Use at your own risk and review the code before running it in production.
+- **Additional Fields**:  
+  You can extend the product mapping CSV or the JSON invoice body to include more Zoho fields (taxes, custom fields, etc.) based on your needs and Zoho Books API documentation.
 
-Customization
-Date Range:
-The default is “since the first of the current month”.
-You can modify the $firstOfMonth logic in the script if you want a different time window.
-
-Zoho Region:
-If your Zoho Books organization is not in the US region, update the Zoho Books API base URL in the script (https://www.zohoapis.com) to the appropriate regional endpoint.
-
-Additional Fields:
-You can extend the product mapping CSV or the JSON invoice body to include more Zoho fields (taxes, custom fields, etc.) based on your needs and Zoho Books API documentation.
+---
