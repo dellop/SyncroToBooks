@@ -1,0 +1,17 @@
+{
+  "Zoho": {
+    "ClientID": "YOUR_ZOHO_CLIENT_ID_HERE",
+    "Secret": "YOUR_ZOHO_SECRET_HERE",
+    "RedirectUri": "https://localhost",
+    "AuthorizeUri": "https://accounts.zoho.com/oauth/v2/auth",
+    "Scope": "ZohoBooks.invoices.CREATE,ZohoBooks.invoices.READ,ZohoBooks.invoices.UPDATE,ZohoBooks.invoices.DELETE",
+    "OrganizationID": "YOUR_ZOHO_ORG_ID_HERE",
+    "AccessToken": "",
+    "RefreshToken": "",
+    "TokenExpiration": ""
+  },
+  "Syncro": {
+    "APIKey": "YOUR_SYNCRO_API_KEY_HERE",
+    "Subdomain": "your-subdomain"
+  }
+}
